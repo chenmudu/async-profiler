@@ -1078,3 +1078,23 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
         _rec->addThread(tid);
     }
 }
+
+void FlightRecorder::recordContextProbe(int lock_index, int tid, u32 call_trace_id,
+                                        uintptr_t pc, uintptr_t sp, uintptr_t fp, uintptr_t current_fp) {
+    if (_rec != NULL) {
+        Buffer* buf = _rec->buffer(lock_index);
+
+        int start = buf->skip(1);
+        buf->put8(T_CONTEXT_PROBE);
+        buf->putVar64(OS::nanotime());
+        buf->putVar32(tid);
+        buf->putVar32(call_trace_id);
+        buf->putVar64(pc);
+        buf->putVar64(sp);
+        buf->putVar64(fp);
+        buf->putVar64(current_fp);
+        buf->put8(start, buf->offset() - start);
+
+        _rec->flushIfNeeded(buf);
+    }
+}

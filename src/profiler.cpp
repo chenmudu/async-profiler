@@ -623,6 +623,9 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, Event*
     u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter);
     _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event, counter);
 
+    StackFrame f(ucontext);
+    _jfr.recordContextProbe(lock_index, tid, call_trace_id, f.pc(), f.sp(), f.fp(), (uintptr_t)__builtin_frame_address(1));
+
     _locks[lock_index].unlock();
 }
 

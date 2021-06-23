@@ -185,6 +185,16 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("key", T_STRING, "Key")
                 << field("value", T_STRING, "Value"))
 
+            << (type("tools.profiler.ContextProbe", T_CONTEXT_PROBE, "Debug Context Probe")
+                << category("Java Virtual Machine", "Profiling")
+                << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
+                << field("sampledThread", T_THREAD, "Thread", F_CPOOL)
+                << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
+                << field("pc", T_LONG, "PC", F_ADDRESS)
+                << field("sp", T_LONG, "SP", F_ADDRESS)
+                << field("fp", T_LONG, "FP", F_ADDRESS)
+                << field("current_fp", T_LONG, "Current FP", F_ADDRESS))
+
             << (type("jdk.jfr.Label", T_LABEL, NULL)
                 << field("value", T_STRING))
 
