@@ -57,8 +57,9 @@ enum FrameTypeId {
     FRAME_JIT_COMPILED = 1,
     FRAME_INLINED      = 2,
     FRAME_NATIVE       = 3,
-    FRAME_CPP          = 4,
-    FRAME_KERNEL       = 5,
+    FRAME_C            = 4,
+    FRAME_CPP          = 5,
+    FRAME_KERNEL       = 6,
 };
 
 
@@ -418,7 +419,7 @@ class Recording {
         } else {
             mi->_name = _symbols.lookup(name);
             mi->_sig = _symbols.lookup("()L;");
-            mi->_type = FRAME_NATIVE;
+            mi->_type = FRAME_C;
         }
     }
 
@@ -779,6 +780,7 @@ class Recording {
         buf->putVar32(FRAME_JIT_COMPILED); buf->putUtf8("JIT compiled");
         buf->putVar32(FRAME_INLINED);      buf->putUtf8("Inlined");
         buf->putVar32(FRAME_NATIVE);       buf->putUtf8("Native");
+        buf->putVar32(FRAME_C);            buf->putUtf8("C");
         buf->putVar32(FRAME_CPP);          buf->putUtf8("C++");
         buf->putVar32(FRAME_KERNEL);       buf->putUtf8("Kernel");
     }
