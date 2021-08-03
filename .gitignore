@@ -2,6 +2,10 @@
 /nbproject/
 /out/
 /.idea/
-/test/*.class
+*.class
 .vscode
+.project
+.classpath
+.settings
 *.iml
+target

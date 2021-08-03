@@ -1,0 +1,11 @@
+dist:
+    stage: build
+    only:
+        - develop
+    script:
+        - make all
+        - mvn package
+    artifacts:
+        paths:
+            - build/install.jar
+        expire_in: 3 months
