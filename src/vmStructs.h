@@ -36,6 +36,7 @@ class VMStructs {
     static int _symbol_length_and_refcount_offset;
     static int _symbol_body_offset;
     static int _class_loader_data_offset;
+    static int _class_loader_data_next_offset;
     static int _methods_offset;
     static int _thread_osthread_offset;
     static int _thread_anchor_offset;
@@ -59,6 +60,9 @@ class VMStructs {
     typedef void (*LockFunc)(void*);
     static LockFunc _lock_func;
     static LockFunc _unlock_func;
+
+    static char* _method_flushing;
+    static int* _sweep_started;
 
     static uintptr_t readSymbol(const char* symbol_name);
     static void initOffsets();
@@ -97,9 +101,6 @@ class VMStructs {
     static bool hasDebugSymbols() {
         return _get_stack_trace != NULL;
     }
-
-    typedef void (JNICALL *UnsafeParkFunc)(JNIEnv*, jobject, jboolean, jlong);
-    static UnsafeParkFunc _unsafe_park;
 };
 
 
@@ -248,6 +249,15 @@ class CollectedHeap : VMStructs {
         return _collected_heap_addr != NULL && _is_gc_active_offset >= 0 &&
                _collected_heap_addr[_is_gc_active_offset] != 0;
     }
+};
+
+class DisableSweeper : VMStructs {
+  private:
+    bool _enabled;
+
+  public:
+    DisableSweeper();
+    ~DisableSweeper();
 };
 
 #endif // _VMSTRUCTS_H

@@ -28,6 +28,7 @@
 #include "engine.h"
 #include "event.h"
 #include "flightRecorder.h"
+#include "log.h"
 #include "mutex.h"
 #include "spinLock.h"
 #include "threadFilter.h"
@@ -95,6 +96,7 @@ class Profiler {
     int _safe_mode;
     CStack _cstack;
     bool _add_thread_frame;
+    bool _add_sched_frame;
     bool _update_thread_names;
     volatile bool _thread_events_state;
 
@@ -136,7 +138,9 @@ class Profiler {
     bool inJavaCode(void* ucontext);
     int getNativeTrace(Engine* engine, void* ucontext, ASGCT_CallFrame* frames, int tid);
     int getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth);
-    int getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int max_depth);
+    int getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth);
+    int getJavaTraceInternal(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int max_depth);
+    int convertFrames(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int num_frames);
     int makeEventFrame(ASGCT_CallFrame* frames, jint event_type, uintptr_t id);
     bool fillTopFrame(const void* pc, ASGCT_CallFrame* frame);
     AddressType getAddressType(instruction_t* pc);
@@ -150,14 +154,14 @@ class Profiler {
     Engine* activeEngine();
     Error checkJvmCapabilities();
 
-  public:
-    static Profiler _instance;
+    static Profiler* const _instance;
 
+  public:
     Profiler() :
         _state(IDLE),
         _begin_trap(2),
         _end_trap(3),
-        _thread_filter(false),
+        _thread_filter(),
         _call_trace_storage(),
         _jfr(),
         _start_time(0),
@@ -174,6 +178,10 @@ class Profiler {
         for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
             _calltrace_buffer[i] = NULL;
         }
+    }
+
+    static Profiler* instance() {
+        return _instance;
     }
 
     u64 total_samples() { return _total_samples; }
@@ -194,6 +202,8 @@ class Profiler {
     void dumpFlameGraph(std::ostream& out, Arguments& args, bool tree);
     void dumpText(std::ostream& out, Arguments& args);
     void recordSample(void* ucontext, u64 counter, jint event_type, Event* event);
+    void writeLog(LogLevel level, const char* message);
+    void writeLog(LogLevel level, const char* message, size_t len);
 
     void updateSymbols(bool kernel_symbols);
     const void* resolveSymbol(const char* name);
@@ -209,25 +219,25 @@ class Profiler {
                                            jint code_size, const void* code_addr,
                                            jint map_length, const jvmtiAddrLocationMap* map,
                                            const void* compile_info) {
-        _instance.addJavaMethod(code_addr, code_size, method);
+        instance()->addJavaMethod(code_addr, code_size, method);
     }
 
     static void JNICALL CompiledMethodUnload(jvmtiEnv* jvmti, jmethodID method,
                                              const void* code_addr) {
-        _instance.removeJavaMethod(code_addr, method);
+        instance()->removeJavaMethod(code_addr, method);
     }
 
     static void JNICALL DynamicCodeGenerated(jvmtiEnv* jvmti, const char* name,
                                              const void* address, jint length) {
-        _instance.addRuntimeStub(address, length, name);
+        instance()->addRuntimeStub(address, length, name);
     }
 
     static void JNICALL ThreadStart(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
-        _instance.onThreadStart(jvmti, jni, thread);
+        instance()->onThreadStart(jvmti, jni, thread);
     }
 
     static void JNICALL ThreadEnd(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
-        _instance.onThreadEnd(jvmti, jni, thread);
+        instance()->onThreadEnd(jvmti, jni, thread);
     }
 
     friend class Recording;

@@ -29,9 +29,9 @@
 #include "flightRecorder.h"
 #include "jfrMetadata.h"
 #include "dictionary.h"
-#include "log.h"
 #include "os.h"
 #include "profiler.h"
+#include "symbols.h"
 #include "threadFilter.h"
 #include "vmStructs.h"
 
@@ -191,7 +191,8 @@ class Buffer {
         if (v == NULL) {
             put8(0);
         } else {
-            putUtf8(v, strlen(v) & MAX_STRING_LENGTH);
+            size_t len = strlen(v);
+            putUtf8(v, len < MAX_STRING_LENGTH ? len : MAX_STRING_LENGTH);
         }
     }
 
@@ -306,7 +307,7 @@ class Recording {
     }
 
   public:
-    Recording(int fd, Arguments& args) : _fd(fd), _thread_set(true), _packages(), _symbols(), _method_map() {
+    Recording(int fd, Arguments& args) : _fd(fd), _thread_set(), _packages(), _symbols(), _method_map() {
         _chunk_start = lseek(_fd, 0, SEEK_END);
         _start_time = OS::millis();
         _start_nanos = OS::nanotime();
@@ -332,14 +333,16 @@ class Recording {
 
     ~Recording() {
         stopCpuMonitor();
+        flush(&_cpu_monitor_buf);
 
-        _stop_nanos = OS::nanotime();
-        _stop_time = OS::millis();
+        writeNativeLibraries(_buf);
 
         for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
             flush(&_buf[i]);
         }
-        flush(&_cpu_monitor_buf);
+
+        _stop_nanos = OS::nanotime();
+        _stop_time = OS::millis();
 
         off_t cpool_offset = lseek(_fd, 0, SEEK_CUR);
         writeCpool(_buf);
@@ -377,7 +380,7 @@ class Recording {
         _append_fd = open(file_name_str, O_WRONLY);
         if (_append_fd >= 0) {
             lseek(_append_fd, 0, SEEK_END);
-            Profiler::_instance.stop();
+            Profiler::instance()->stop();
             close(_append_fd);
             _append_fd = -1;
         } else {
@@ -392,7 +395,7 @@ class Recording {
     }
 
     void fillNativeMethodInfo(MethodInfo* mi, const char* name) {
-        mi->_class = Profiler::_instance.classMap()->lookup("");
+        mi->_class = Profiler::instance()->classMap()->lookup("");
         mi->_modifiers = 0x100;
         mi->_line_number_table_size = 0;
         mi->_line_number_table = NULL;
@@ -433,11 +436,11 @@ class Recording {
         if (jvmti->GetMethodDeclaringClass(method, &method_class) == 0 &&
             jvmti->GetClassSignature(method_class, &class_name, NULL) == 0 &&
             jvmti->GetMethodName(method, &method_name, &method_sig, NULL) == 0) {
-            mi->_class = Profiler::_instance.classMap()->lookup(class_name + 1, strlen(class_name) - 2);
+            mi->_class = Profiler::instance()->classMap()->lookup(class_name + 1, strlen(class_name) - 2);
             mi->_name = _symbols.lookup(method_name);
             mi->_sig = _symbols.lookup(method_sig);
         } else {
-            mi->_class = Profiler::_instance.classMap()->lookup("");
+            mi->_class = Profiler::instance()->classMap()->lookup("");
             mi->_name = _symbols.lookup("jvmtiError");
             mi->_sig = _symbols.lookup("()L;");
         }
@@ -639,6 +642,10 @@ class Recording {
         if (args._lock > 0) {
             writeIntSetting(buf, T_MONITOR_ENTER, "lock", args._lock);
         }
+
+        writeBoolSetting(buf, T_ACTIVE_RECORDING, "debugSymbols", VMStructs::hasDebugSymbols());
+        writeBoolSetting(buf, T_ACTIVE_RECORDING, "kernelSymbols", Symbols::haveKernelSymbols());
+        writeBoolSetting(buf, T_ACTIVE_RECORDING, "loadLibraryHook", Profiler::instance()->_original_NativeLibrary_load != NULL);
     }
 
     void writeStringSetting(Buffer* buf, int category, const char* key, const char* value) {
@@ -753,6 +760,24 @@ class Recording {
         jvmti->Deallocate((unsigned char*)keys);
     }
 
+    void writeNativeLibraries(Buffer* buf) {
+        Profiler* profiler = Profiler::instance();
+        NativeCodeCache** native_libs = profiler->_native_libs;
+        int native_lib_count = profiler->_native_lib_count;
+
+        for (int i = 0; i < native_lib_count; i++) {
+            flushIfNeeded(buf, RECORDING_BUFFER_LIMIT - MAX_STRING_LENGTH);
+            int start = buf->skip(5);
+            buf->put8(T_NATIVE_LIBRARY);
+            buf->putVar64(_start_nanos);
+            buf->putUtf8(native_libs[i]->name());
+            buf->putVar64((uintptr_t) native_libs[i]->minAddress());
+            buf->putVar64((uintptr_t) native_libs[i]->maxAddress());
+            buf->putVar32(start, buf->offset() - start);
+            
+        }
+    }
+
     void writeCpool(Buffer* buf) {
         buf->skip(5);  // size will be patched later
         buf->putVar32(T_CPOOL);
@@ -761,7 +786,7 @@ class Recording {
         buf->putVar32(0);
         buf->putVar32(1);
 
-        buf->putVar32(8);
+        buf->putVar32(9);
 
         writeFrameTypes(buf);
         writeThreadStates(buf);
@@ -771,6 +796,7 @@ class Recording {
         writeClasses(buf);
         writePackages(buf);
         writeSymbols(buf);
+        writeLogLevels(buf);
     }
 
     void writeFrameTypes(Buffer* buf) {
@@ -796,9 +822,10 @@ class Recording {
         std::vector<int> threads;
         _thread_set.collect(threads);
 
-        MutexLocker ml(Profiler::_instance._thread_names_lock);
-        std::map<int, std::string>& thread_names = Profiler::_instance._thread_names;
-        std::map<int, jlong>& thread_ids = Profiler::_instance._thread_ids;
+        Profiler* profiler = Profiler::instance();
+        MutexLocker ml(profiler->_thread_names_lock);
+        std::map<int, std::string>& thread_names = profiler->_thread_names;
+        std::map<int, jlong>& thread_ids = profiler->_thread_ids;
         char name_buf[32];
 
         buf->putVar32(T_THREAD);
@@ -831,7 +858,7 @@ class Recording {
 
     void writeStackTraces(Buffer* buf) {
         std::map<u32, CallTrace*> traces;
-        Profiler::_instance._call_trace_storage.collectTraces(traces);
+        Profiler::instance()->_call_trace_storage.collectTraces(traces);
 
         buf->putVar32(T_STACK_TRACE);
         buf->putVar32(traces.size());
@@ -881,7 +908,7 @@ class Recording {
 
     void writeClasses(Buffer* buf) {
         std::map<u32, const char*> classes;
-        Profiler::_instance.classMap()->collect(classes);
+        Profiler::instance()->classMap()->collect(classes);
 
         buf->putVar32(T_CLASS);
         buf->putVar32(classes.size());
@@ -919,6 +946,15 @@ class Recording {
             buf->putVar32(it->first);
             buf->putUtf8(it->second);
             flushIfNeeded(buf);
+        }
+    }
+
+    void writeLogLevels(Buffer* buf) {
+        buf->putVar32(T_LOG_LEVEL);
+        buf->putVar32(LOG_ERROR - LOG_TRACE + 1);
+        for (int i = LOG_TRACE; i <= LOG_ERROR; i++) {
+            buf->putVar32(i);
+            buf->putUtf8(Log::LEVEL_NAME[i]);
         }
     }
 
@@ -1025,11 +1061,13 @@ Error FlightRecorder::start(Arguments& args, bool reset) {
     }
 
     _rec = new Recording(fd, args);
+    _rec_lock.unlock();
     return Error::OK;
 }
 
 void FlightRecorder::stop() {
     if (_rec != NULL) {
+        _rec_lock.lock();
         delete _rec;
         _rec = NULL;
     }
@@ -1079,4 +1117,25 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
         _rec->flushIfNeeded(buf);
         _rec->addThread(tid);
     }
+}
+
+void FlightRecorder::recordLog(LogLevel level, const char* message, size_t len) {
+    if (!_rec_lock.tryLockShared()) {
+        // No active recording
+        return;
+    }
+
+    if (len > MAX_STRING_LENGTH) len = MAX_STRING_LENGTH;
+    Buffer* buf = (Buffer*)alloca(len + 40);
+    buf->reset();
+
+    int start = buf->skip(5);
+    buf->put8(T_LOG);
+    buf->putVar64(OS::nanotime());
+    buf->put8(level);
+    buf->putUtf8(message, len);
+    buf->putVar32(start, buf->offset() - start);
+    _rec->flush(buf);
+
+    _rec_lock.unlockShared();
 }

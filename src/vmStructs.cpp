@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 #include "vmStructs.h"
 #include "vmEntry.h"
 
@@ -33,6 +34,7 @@ int VMStructs::_symbol_length_offset = -1;
 int VMStructs::_symbol_length_and_refcount_offset = -1;
 int VMStructs::_symbol_body_offset = -1;
 int VMStructs::_class_loader_data_offset = -1;
+int VMStructs::_class_loader_data_next_offset = -1;
 int VMStructs::_methods_offset = -1;
 int VMStructs::_thread_osthread_offset = -1;
 int VMStructs::_thread_anchor_offset = -1;
@@ -51,10 +53,11 @@ int VMStructs::_tls_index = -1;
 intptr_t VMStructs::_env_offset;
 
 VMStructs::GetStackTraceFunc VMStructs::_get_stack_trace = NULL;
-VMStructs::UnsafeParkFunc VMStructs::_unsafe_park = NULL;
 VMStructs::FindBlobFunc VMStructs::_find_blob = NULL;
 VMStructs::LockFunc VMStructs::_lock_func;
 VMStructs::LockFunc VMStructs::_unlock_func;
+char* VMStructs::_method_flushing = NULL;
+int* VMStructs::_sweep_started = NULL;
 
 
 uintptr_t VMStructs::readSymbol(const char* symbol_name) {
@@ -115,6 +118,10 @@ void VMStructs::initOffsets() {
             } else if (strcmp(field, "_methods") == 0) {
                 _methods_offset = *(int*)(entry + offset_offset);
             }
+        } else if (strcmp(type, "ClassLoaderData") == 0) {
+            if (strcmp(field, "_next") == 0) {
+                _class_loader_data_next_offset = *(int*)(entry + offset_offset);
+            }
         } else if (strcmp(type, "java_lang_Class") == 0) {
             if (strcmp(field, "_klass_offset") == 0) {
                 int klass_offset = **(int**)(entry + address_offset);
@@ -169,12 +176,6 @@ void VMStructs::initJvmFunctions() {
         _get_stack_trace = (GetStackTraceFunc)_libjvm->findSymbol("_ZN8JvmtiEnv13GetStackTraceEP10JavaThreadiiP14jvmtiFrameInfoPi");
     }
 
-    _unsafe_park = (UnsafeParkFunc)_libjvm->findSymbol("Unsafe_Park");
-    if (_unsafe_park == NULL) {
-        // In some macOS builds of JDK 11 Unsafe_Park appears to have a C++ decorated name
-        _unsafe_park = (UnsafeParkFunc)_libjvm->findSymbol("_ZL11Unsafe_ParkP7JNIEnv_P8_jobjecthl");
-    }
-
     if (_frame_size_offset >= 0) {
         _find_blob = (FindBlobFunc)_libjvm->findSymbol("_ZN9CodeCache16find_blob_unsafeEPv");
         if (_find_blob == NULL) {
@@ -182,10 +183,18 @@ void VMStructs::initJvmFunctions() {
         }
     }
 
-    if (VM::hotspot_version() == 8 && _class_loader_data_offset >= 0 && _methods_offset >= 0 && _klass != NULL) {
+    if (VM::hotspot_version() == 8 && _class_loader_data_offset >= 0 &&
+        _class_loader_data_next_offset == sizeof(uintptr_t) * 8 + 8 &&
+        _methods_offset >= 0 && _klass != NULL)
+    {
         _lock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor28lock_without_safepoint_checkEv");
         _unlock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor6unlockEv");
         _has_class_loader_data = _lock_func != NULL && _unlock_func != NULL;
+    }
+
+    if (VM::hotspot_version() > 0 && VM::hotspot_version() < 11) {
+        _method_flushing = (char*)_libjvm->findSymbol("MethodFlushing");
+        _sweep_started = (int*)_libjvm->findSymbol("_ZN14NMethodSweeper14_sweep_startedE");
     }
 }
 
@@ -237,4 +246,28 @@ void VMStructs::initLogging(JNIEnv* env) {
 
 VMThread* VMThread::current() {
     return (VMThread*)pthread_getspecific((pthread_key_t)_tls_index);
+}
+
+DisableSweeper::DisableSweeper() {
+    // Workaround for JDK-8212160: Temporarily disable MethodFlushing
+    // while generating initial set of CompiledMethodLoad events
+    _enabled = _method_flushing != NULL && *_method_flushing;
+    if (!_enabled) return;
+
+    *_method_flushing = 0;
+    __sync_synchronize();
+
+    // Wait a bit in case sweeping has already started
+    for (int i = 0; i < 4; i++) {
+        if (_sweep_started == NULL || *_sweep_started) {
+            usleep(1000);
+        }
+    }
+}
+
+DisableSweeper::~DisableSweeper() {
+    if (!_enabled) return;
+
+    *_method_flushing = 1;
+    __sync_synchronize();
 }
